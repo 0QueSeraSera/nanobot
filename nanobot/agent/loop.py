@@ -45,6 +45,7 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+    _SESSION_SUFFIX_RE = re.compile(r"^[\w-]+$")
 
     def __init__(
         self,
@@ -356,13 +357,29 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        # Get active session key (includes suffix if set)
-        base_key = session_key or msg.session_key
-        if ":" in base_key:
-            parts = base_key.split(":", 1)
-            active_key = self.sessions.get_active_session_key(parts[0], parts[1])
-        else:
-            active_key = base_key
+        # Resolve base/active session key.
+        # Keys are normally "channel:chat_id". Named sessions append ":suffix".
+        raw_key = session_key or msg.session_key
+        base_key = raw_key
+        active_key = raw_key
+
+        if ":" in raw_key:
+            # Parse channel and the remainder (chat_id or chat_id:suffix).
+            channel, remainder = raw_key.split(":", 1)
+            if ":" in remainder:
+                chat_id, possible_suffix = remainder.rsplit(":", 1)
+                if self._SESSION_SUFFIX_RE.match(possible_suffix):
+                    # Treat this as an explicitly selected named session, and
+                    # persist that choice as the active session for later turns.
+                    base_key = f"{channel}:{chat_id}"
+                    active_key = raw_key
+                    self.sessions.set_active_session(channel, chat_id, possible_suffix)
+                else:
+                    base_key = raw_key
+                    active_key = self.sessions.get_active_session_key(channel, remainder)
+            else:
+                base_key = raw_key
+                active_key = self.sessions.get_active_session_key(channel, remainder)
 
         session = self.sessions.get_or_create(active_key)
 
@@ -387,7 +404,7 @@ class AgentLoop:
                     for s in user_sessions:
                         marker = "▶ " if s["suffix"] == (current_suffix or "default") else "  "
                         count = s.get("message_count", 0)
-                        preview_text = s.get("last_message_preview", "")[:40]
+                        preview_text = (s.get("last_message_preview") or "")[:40]
                         lines.append(f"{marker}`{s['suffix']}` ({count} msgs) {preview_text}")
                     lines.append("\nSwitch: `/session <name>` | Default: `/session default`")
                     return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines))
